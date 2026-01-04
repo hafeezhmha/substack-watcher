@@ -170,15 +170,42 @@ Ticket Link: {ticket_link if ticket_link else "No specific booking link found."}
     except Exception as e:
         print(f"Failed to send email: {e}")
 
+import subprocess
+
+def fetch_with_curl(url):
+    """Fallback to curl if requests fails (often bypasses TLS fingerprinting issues)."""
+    try:
+        command = [
+            "curl",
+            "-L",  # Follow redirects
+            "-A", REQUEST_HEADERS["User-Agent"],
+            "-H", f"Accept: {REQUEST_HEADERS['Accept']}",
+            "-H", f"Accept-Language: {REQUEST_HEADERS['Accept-Language']}",
+            "--max-time", "10",
+            url
+        ]
+        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        return result.stdout.encode('utf-8') # Return bytes to match requests.content
+    except subprocess.CalledProcessError as e:
+        print(f"Curl failed: {e}")
+        return None
+    except Exception as e:
+        print(f"Curl execution error: {e}")
+        return None
+
 def fetch_feed():
     url = f"https://{SUBSTACK_DOMAIN}/feed.xml"
+    
+    # Try requests first
     try:
         resp = requests.get(url, headers=REQUEST_HEADERS, timeout=10)
         resp.raise_for_status()
         return resp.content
     except Exception as e:
-        print(f"Error fetching feed: {e}")
-        return None
+        print(f"Requests failed ({e}), trying curl fallback...")
+        
+    # Fallback to curl
+    return fetch_with_curl(url)
 
 def main():
     state = load_state()
