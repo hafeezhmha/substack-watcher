@@ -1,0 +1,48 @@
+name: Substack Watcher
+
+on:
+  schedule:
+    # Peak hours: 04:00 UTC to 20:00 UTC (09:30 IST to 01:30 IST) -> Every 30 mins
+    - cron: '*/30 4-20 * * *'
+    # Off hours: Rare night posts -> Every 2 hours
+    - cron: '0 22,0,2 * * *'
+  workflow_dispatch:      # Allow manual trigger
+
+permissions:
+  contents: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; else pip install requests; fi
+
+      - name: Run watcher script
+        env:
+          EMAIL_ADDRESS: ${{ secrets.EMAIL_ADDRESS }}
+          EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python watch_pintofview.py
+
+      - name: Commit state changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [[ -n $(git status -s state.json) ]]; then
+            git add state.json
+            git commit -m "Update state.json [skip ci]"
+            git push
+          else
+            echo "No changes to state.json"
+          fi
