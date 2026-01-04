@@ -41,7 +41,21 @@ import requests
 # Configuration
 SUBSTACK_DOMAIN = "pintofviewclub.substack.com"
 STATE_FILE = "state.json"
-USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+# Headers to mimic a real browser to avoid 403 Forbidden
+REQUEST_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Cache-Control": "max-age=0",
+}
 
 # Email Configuration from Environment Variables
 EMAIL_ADDRESS = os.environ.get("EMAIL_ADDRESS")
@@ -98,9 +112,8 @@ def save_state(state):
 
 def fetch_archive():
     url = f"https://{SUBSTACK_DOMAIN}/api/v1/archive?sort=new&limit=5"
-    headers = {"User-Agent": USER_AGENT}
     try:
-        resp = requests.get(url, headers=headers, timeout=10)
+        resp = requests.get(url, headers=REQUEST_HEADERS, timeout=10)
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
@@ -109,9 +122,8 @@ def fetch_archive():
 
 def fetch_post_details(slug):
     url = f"https://{SUBSTACK_DOMAIN}/api/v1/posts/{slug}"
-    headers = {"User-Agent": USER_AGENT}
     try:
-        resp = requests.get(url, headers=headers, timeout=10)
+        resp = requests.get(url, headers=REQUEST_HEADERS, timeout=10)
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
