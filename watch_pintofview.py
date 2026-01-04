@@ -175,17 +175,17 @@ import subprocess
 def fetch_with_curl(url):
     """Fallback to curl if requests fails (often bypasses TLS fingerprinting issues)."""
     try:
+        # Use a Feed Reader User-Agent for the fallback
+        ua = "Feedly/1.0 (+http://www.feedly.com/fetcher.html; like FeedFetcher-Google)"
         command = [
             "curl",
-            "-L",  # Follow redirects
-            "-A", REQUEST_HEADERS["User-Agent"],
-            "-H", f"Accept: {REQUEST_HEADERS['Accept']}",
-            "-H", f"Accept-Language: {REQUEST_HEADERS['Accept-Language']}",
+            "-L",
+            "-A", ua,
             "--max-time", "10",
             url
         ]
         result = subprocess.run(command, capture_output=True, text=True, check=True)
-        return result.stdout.encode('utf-8') # Return bytes to match requests.content
+        return result.stdout.encode('utf-8')
     except subprocess.CalledProcessError as e:
         print(f"Curl failed: {e}")
         return None
@@ -283,6 +283,10 @@ def main():
 
     except ET.ParseError as e:
         print(f"Error parsing XML feed: {e}")
+        try:
+            print(f"Response content snippet: {feed_content[:500].decode('utf-8', errors='ignore')}")
+        except:
+            print("Could not print content snippet")
 
 if __name__ == "__main__":
     main()
