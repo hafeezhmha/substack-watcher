@@ -111,7 +111,7 @@ def save_state(state):
         json.dump(state, f, indent=2)
 
 
-import xml.etree.ElementTree as ET
+
 
 def is_ticketing_link(url):
     url_lower = url.lower()
@@ -170,123 +170,81 @@ Ticket Link: {ticket_link if ticket_link else "No specific booking link found."}
     except Exception as e:
         print(f"Failed to send email: {e}")
 
-import subprocess
 
-def fetch_with_curl(url):
-    """Fallback to curl if requests fails (often bypasses TLS fingerprinting issues)."""
-    try:
-        # Use a Feed Reader User-Agent for the fallback
-        ua = "Feedly/1.0 (+http://www.feedly.com/fetcher.html; like FeedFetcher-Google)"
-        command = [
-            "curl",
-            "-L",
-            "-A", ua,
-            "--max-time", "10",
-            url
-        ]
-        result = subprocess.run(command, capture_output=True, text=True, check=True)
-        return result.stdout.encode('utf-8')
-    except subprocess.CalledProcessError as e:
-        print(f"Curl failed: {e}")
-        return None
-    except Exception as e:
-        print(f"Curl execution error: {e}")
-        return None
-
-def fetch_feed():
-    url = f"https://{SUBSTACK_DOMAIN}/feed.xml"
+def fetch_feed_json():
+    # Use rss2json.com as a proxy to bypass Cloudflare and parse XML to JSON
+    # This avoids the 403 Forbidden error from Substack's direct RSS feed.
+    rss_url = f"https://{SUBSTACK_DOMAIN}/feed.xml"
+    api_url = f"https://api.rss2json.com/v1/api.json?rss_url={rss_url}"
     
-    # Try requests first
     try:
-        resp = requests.get(url, headers=REQUEST_HEADERS, timeout=10)
+        resp = requests.get(api_url, timeout=15)
         resp.raise_for_status()
-        return resp.content
+        data = resp.json()
+        if data.get("status") != "ok":
+            print(f"rss2json error: {data.get('message')}")
+            return None
+        return data
     except Exception as e:
-        print(f"Requests failed ({e}), trying curl fallback...")
-        
-    # Fallback to curl
-    return fetch_with_curl(url)
+        print(f"Error fetching feed via rss2json: {e}")
+        return None
 
 def main():
     state = load_state()
     last_post_id = state.get("last_post_id")
     
-    feed_content = fetch_feed()
-    if not feed_content:
+    feed_data = fetch_feed_json()
+    if not feed_data or "items" not in feed_data:
+        print("No items found in feed.")
         return
 
-    try:
-        root = ET.fromstring(feed_content)
-        # RSS 2.0: channel -> item
-        channel = root.find("channel")
-        if channel is None:
-            print("Invalid feed format: no channel found")
-            return
-            
-        latest_item = channel.find("item")
-        if latest_item is None:
-            print("No items found in feed.")
-            return
+    items = feed_data["items"]
+    if not items:
+        print("No items found.")
+        return
+        
+    latest_item = items[0]
 
-        # Extract details
-        title = latest_item.find("title").text
-        link = latest_item.find("link").text
-        pub_date = latest_item.find("pubDate").text
-        guid = latest_item.find("guid").text
-        
-        # Use guid as ID (it's usually the permalink)
-        # We can also handle simple string comparison for state
-        current_id = guid
-        
-        if last_post_id and current_id == last_post_id:
-            print("No new posts.")
-            return
+    # Extract details
+    title = latest_item.get("title")
+    link = latest_item.get("link")
+    pub_date = latest_item.get("pubDate")
+    guid = latest_item.get("guid")
+    
+    # Use guid as ID
+    current_id = guid
+    
+    if last_post_id and current_id == last_post_id:
+        print("No new posts.")
+        return
 
-        print(f"New post detected: {title}")
-        
-        # Get content for ticket link extraction
-        # Content is often in <content:encoded>, which ElementTree might handle with namespaces
-        # Or we can just grab description if content is missing
-        
-        # Namespace map for 'content'
-        namespaces = {'content': 'http://purl.org/rss/1.0/modules/content/'}
-        content_encoded = latest_item.find('content:encoded', namespaces)
-        
-        body_html = ""
-        if content_encoded is not None:
-            body_html = content_encoded.text
-        else:
-            description = latest_item.find("description")
-            if description is not None:
-                body_html = description.text
-        
-        ticket_link = None
-        if body_html:
-            ticket_link = extract_ticket_link(body_html)
-        
-        if not ticket_link:
-            print("No ticket link found in post body.")
-        else:
-            print(f"Found ticket link: {ticket_link}")
+    print(f"New post detected: {title}")
+    
+    # rss2json typically puts the full content in 'content'
+    body_html = latest_item.get("content", "")
+    if not body_html:
+        body_html = latest_item.get("description", "")
+    
+    ticket_link = None
+    if body_html:
+        ticket_link = extract_ticket_link(body_html)
+    
+    if not ticket_link:
+        print("No ticket link found in post body.")
+    else:
+        print(f"Found ticket link: {ticket_link}")
 
-        # Send email
-        send_email(
-            post_title=title,
-            published_date=pub_date,
-            ticket_link=ticket_link
-        )
+    # Send email
+    send_email(
+        post_title=title,
+        published_date=pub_date,
+        ticket_link=ticket_link
+    )
 
-        # Update state
-        state["last_post_id"] = current_id
-        state["last_published_at"] = pub_date
-        save_state(state)
-
-    except ET.ParseError as e:
-        print(f"Error parsing XML feed: {e}")
-        try:
-            print(f"Response content snippet: {feed_content[:500].decode('utf-8', errors='ignore')}")
-        except:
-            print("Could not print content snippet")
+    # Update state
+    state["last_post_id"] = current_id
+    state["last_published_at"] = pub_date
+    save_state(state)
 
 if __name__ == "__main__":
     main()
