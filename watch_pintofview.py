@@ -110,129 +110,98 @@ def save_state(state):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
 
-def fetch_archive():
-    url = f"https://{SUBSTACK_DOMAIN}/api/v1/archive?sort=new&limit=5"
-    try:
-        resp = requests.get(url, headers=REQUEST_HEADERS, timeout=10)
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e:
-        print(f"Error fetching archive: {e}")
-        return []
 
-def fetch_post_details(slug):
-    url = f"https://{SUBSTACK_DOMAIN}/api/v1/posts/{slug}"
+# ... (imports remain the same, adding xml.etree.ElementTree)
+import xml.etree.ElementTree as ET
+
+# ... (Configuration, Email Config, Ticketing logic, LinkExtractor, State functions remain same)
+
+def fetch_feed():
+    url = f"https://{SUBSTACK_DOMAIN}/feed.xml"
     try:
         resp = requests.get(url, headers=REQUEST_HEADERS, timeout=10)
         resp.raise_for_status()
-        return resp.json()
+        return resp.content
     except Exception as e:
-        print(f"Error fetching post details for {slug}: {e}")
+        print(f"Error fetching feed: {e}")
         return None
-
-def is_ticketing_link(url):
-    url_lower = url.lower()
-    
-    # Ignore internal links and social
-    if "substack.com" in url_lower and "pintofviewclub" in url_lower:
-        return False
-    if "facebook.com" in url_lower or "twitter.com" in url_lower or "instagram.com" in url_lower or "linkedin.com" in url_lower:
-        return False
-        
-    for domain in KNOWN_TICKETING_DOMAINS:
-        if domain in url_lower:
-            return True
-            
-    # Check for keywords in the path/query (not as reliable, but helpful)
-    for keyword in TICKET_KEYWORDS:
-        if keyword in url_lower:
-            return True
-            
-    return False
-
-def extract_ticket_link(body_html):
-    parser = LinkExtractor()
-    parser.feed(body_html)
-    
-    for link in parser.links:
-        if is_ticketing_link(link):
-            return link
-            
-    return None
-
-def send_email(post_title, published_date, ticket_link):
-    if not EMAIL_ADDRESS or not EMAIL_APP_PASSWORD or not EMAIL_TO:
-        print("Email credentials not set. Skipping email.")
-        print(f"Would have sent: {post_title} - {ticket_link}")
-        return
-
-    msg = EmailMessage()
-    msg['Subject'] = "New Pint of View guest announced"
-    msg['From'] = EMAIL_ADDRESS
-    msg['To'] = EMAIL_TO
-
-    content = f"""
-New post published: {post_title}
-Date: {published_date}
-
-Ticket Link: {ticket_link if ticket_link else "No specific booking link found."}
-    """
-    msg.set_content(content)
-
-    try:
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
-            smtp.login(EMAIL_ADDRESS, EMAIL_APP_PASSWORD)
-            smtp.send_message(msg)
-        print("Email sent successfully.")
-    except Exception as e:
-        print(f"Failed to send email: {e}")
 
 def main():
     state = load_state()
     last_post_id = state.get("last_post_id")
     
-    archive = fetch_archive()
-    if not archive:
-        print("No posts found in archive.")
+    feed_content = fetch_feed()
+    if not feed_content:
         return
 
-    # archive is a list of posts
-    latest_post = archive[0]
-    latest_id = latest_post.get("id")
-    latest_slug = latest_post.get("slug")
-    
-    if last_post_id and latest_id == last_post_id:
-        print("No new posts.")
-        return
+    try:
+        root = ET.fromstring(feed_content)
+        # RSS 2.0: channel -> item
+        channel = root.find("channel")
+        if channel is None:
+            print("Invalid feed format: no channel found")
+            return
+            
+        latest_item = channel.find("item")
+        if latest_item is None:
+            print("No items found in feed.")
+            return
 
-    print(f"New post detected: {latest_post.get('title')} (ID: {latest_id})")
-    
-    # It's a new post (or first run)
-    # Fetch details to get body_html
-    post_details = fetch_post_details(latest_slug)
-    ticket_link = None
-    
-    if post_details:
-        body_html = post_details.get("body_html", "")
+        # Extract details
+        title = latest_item.find("title").text
+        link = latest_item.find("link").text
+        pub_date = latest_item.find("pubDate").text
+        guid = latest_item.find("guid").text
+        
+        # Use guid as ID (it's usually the permalink)
+        # We can also handle simple string comparison for state
+        current_id = guid
+        
+        if last_post_id and current_id == last_post_id:
+            print("No new posts.")
+            return
+
+        print(f"New post detected: {title}")
+        
+        # Get content for ticket link extraction
+        # Content is often in <content:encoded>, which ElementTree might handle with namespaces
+        # Or we can just grab description if content is missing
+        
+        # Namespace map for 'content'
+        namespaces = {'content': 'http://purl.org/rss/1.0/modules/content/'}
+        content_encoded = latest_item.find('content:encoded', namespaces)
+        
+        body_html = ""
+        if content_encoded is not None:
+            body_html = content_encoded.text
+        else:
+            description = latest_item.find("description")
+            if description is not None:
+                body_html = description.text
+        
+        ticket_link = None
         if body_html:
             ticket_link = extract_ticket_link(body_html)
-    
-    if not ticket_link:
-        print("No ticket link found in post body.")
-    else:
-        print(f"Found ticket link: {ticket_link}")
+        
+        if not ticket_link:
+            print("No ticket link found in post body.")
+        else:
+            print(f"Found ticket link: {ticket_link}")
 
-    # Send email
-    send_email(
-        post_title=latest_post.get("title"),
-        published_date=latest_post.get("post_date"),
-        ticket_link=ticket_link
-    )
+        # Send email
+        send_email(
+            post_title=title,
+            published_date=pub_date,
+            ticket_link=ticket_link
+        )
 
-    # Update state
-    state["last_post_id"] = latest_id
-    state["last_published_at"] = latest_post.get("post_date")
-    save_state(state)
+        # Update state
+        state["last_post_id"] = current_id
+        state["last_published_at"] = pub_date
+        save_state(state)
+
+    except ET.ParseError as e:
+        print(f"Error parsing XML feed: {e}")
 
 if __name__ == "__main__":
     main()
