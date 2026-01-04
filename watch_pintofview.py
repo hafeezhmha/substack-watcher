@@ -111,10 +111,64 @@ def save_state(state):
         json.dump(state, f, indent=2)
 
 
-# ... (imports remain the same, adding xml.etree.ElementTree)
 import xml.etree.ElementTree as ET
 
-# ... (Configuration, Email Config, Ticketing logic, LinkExtractor, State functions remain same)
+def is_ticketing_link(url):
+    url_lower = url.lower()
+    
+    # Ignore internal links and social
+    if "substack.com" in url_lower and "pintofviewclub" in url_lower:
+        return False
+    if "facebook.com" in url_lower or "twitter.com" in url_lower or "instagram.com" in url_lower or "linkedin.com" in url_lower:
+        return False
+        
+    for domain in KNOWN_TICKETING_DOMAINS:
+        if domain in url_lower:
+            return True
+            
+    # Check for keywords in the path/query (not as reliable, but helpful)
+    for keyword in TICKET_KEYWORDS:
+        if keyword in url_lower:
+            return True
+            
+    return False
+
+def extract_ticket_link(body_html):
+    parser = LinkExtractor()
+    parser.feed(body_html)
+    
+    for link in parser.links:
+        if is_ticketing_link(link):
+            return link
+            
+    return None
+
+def send_email(post_title, published_date, ticket_link):
+    if not EMAIL_ADDRESS or not EMAIL_APP_PASSWORD or not EMAIL_TO:
+        print("Email credentials not set. Skipping email.")
+        print(f"Would have sent: {post_title} - {ticket_link}")
+        return
+
+    msg = EmailMessage()
+    msg['Subject'] = "New Pint of View guest announced"
+    msg['From'] = EMAIL_ADDRESS
+    msg['To'] = EMAIL_TO
+
+    content = f"""
+New post published: {post_title}
+Date: {published_date}
+
+Ticket Link: {ticket_link if ticket_link else "No specific booking link found."}
+    """
+    msg.set_content(content)
+
+    try:
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+            smtp.login(EMAIL_ADDRESS, EMAIL_APP_PASSWORD)
+            smtp.send_message(msg)
+        print("Email sent successfully.")
+    except Exception as e:
+        print(f"Failed to send email: {e}")
 
 def fetch_feed():
     url = f"https://{SUBSTACK_DOMAIN}/feed.xml"
