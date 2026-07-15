@@ -31,10 +31,11 @@ import os
 import json
 import sys
 import smtplib
-import re
-from datetime import datetime
+import time
+import xml.etree.ElementTree as ET
 from email.message import EmailMessage
 from html.parser import HTMLParser
+from urllib.parse import urlparse
 
 import requests
 
@@ -65,11 +66,13 @@ EMAIL_TO = os.environ.get("EMAIL_TO")
 # Ticketing logic
 KNOWN_TICKETING_DOMAINS = [
     "eventbrite",
-    "ticket",
     "lu.ma",
     "ra.co",
     "razorpay.com",
-    "bookmyshow"
+    "rzp.io",
+    "bookmyshow",
+    "urbanaut.app",
+    "puttingscene.com",
 ]
 
 TICKET_KEYWORDS = [
@@ -79,23 +82,48 @@ TICKET_KEYWORDS = [
     "register"
 ]
 
+BOOKING_PATH_KEYWORDS = [
+    "booking",
+    "bookings",
+    "checkout",
+    "event",
+    "events",
+    "spot",
+]
+
+IGNORED_LINK_DOMAINS = [
+    "facebook.com",
+    "instagram.com",
+    "linkedin.com",
+    "substackcdn.com",
+    "twitter.com",
+    "x.com",
+]
+
+IMAGE_EXTENSIONS = (".avif", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp")
+
 class LinkExtractor(HTMLParser):
     def __init__(self):
         super().__init__()
         self.links = []
+        self.current_link = None
+        self.current_text = []
 
     def handle_starttag(self, tag, attrs):
         if tag == "a":
-            href = None
-            text = "" # We might want text, but HTMLParser processes text in handle_data separate from tags.
-                      # We can't easily associate text with the exact tag without a more complex state machine.
-                      # For now, let's just look at the href.
-            for attr, val in attrs:
-                if attr == "href":
-                    href = val
-            
-            if href:
-                self.links.append(href)
+            attributes = dict(attrs)
+            self.current_link = attributes.get("href")
+            self.current_text = []
+
+    def handle_data(self, data):
+        if self.current_link:
+            self.current_text.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self.current_link:
+            self.links.append((self.current_link, " ".join(self.current_text)))
+            self.current_link = None
+            self.current_text = []
 
 def load_state():
     if not os.path.exists(STATE_FILE):
@@ -113,52 +141,73 @@ def save_state(state):
 
 
 
-def is_ticketing_link(url):
-    url_lower = url.lower()
-    
-    # Ignore internal links and social
-    if "substack.com" in url_lower and "pintofviewclub" in url_lower:
-        return False
-    if "facebook.com" in url_lower or "twitter.com" in url_lower or "instagram.com" in url_lower or "linkedin.com" in url_lower:
-        return False
-        
-    for domain in KNOWN_TICKETING_DOMAINS:
-        if domain in url_lower:
-            return True
-            
-    # Check for keywords in the path/query (not as reliable, but helpful)
-    for keyword in TICKET_KEYWORDS:
-        if keyword in url_lower:
-            return True
-            
-    return False
+def ticket_link_score(url, text):
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return 0
 
-def extract_ticket_link(body_html):
+    hostname = parsed.hostname.lower()
+    path_and_query = f"{parsed.path}?{parsed.query}".lower()
+    text_lower = text.lower()
+
+    if hostname.endswith("substack.com") or any(
+        hostname == domain or hostname.endswith(f".{domain}")
+        for domain in IGNORED_LINK_DOMAINS
+    ):
+        return 0
+    if parsed.path.lower().endswith(IMAGE_EXTENSIONS):
+        return 0
+
+    score = 0
+    if any(hostname == domain or hostname.endswith(f".{domain}") for domain in KNOWN_TICKETING_DOMAINS):
+        score += 100
+    if any(keyword in hostname for keyword in TICKET_KEYWORDS):
+        score += 40
+    if any(keyword in path_and_query for keyword in TICKET_KEYWORDS):
+        score += 40
+    if any(keyword in path_and_query for keyword in BOOKING_PATH_KEYWORDS):
+        score += 30
+    if any(keyword in text_lower for keyword in TICKET_KEYWORDS):
+        score += 40
+
+    return score
+
+def extract_ticket_links(body_html):
     parser = LinkExtractor()
     parser.feed(body_html)
-    
-    for link in parser.links:
-        if is_ticketing_link(link):
-            return link
-            
-    return None
 
-def send_email(post_title, published_date, ticket_link):
+    candidates = [
+        (ticket_link_score(url, text), index, url)
+        for index, (url, text) in enumerate(parser.links)
+    ]
+    candidates = [candidate for candidate in candidates if candidate[0] > 0]
+    return list(dict.fromkeys(candidate[2] for candidate in candidates))
+
+
+def extract_ticket_link(body_html):
+    candidates = extract_ticket_links(body_html)
+    if not candidates:
+        return None
+
+    return candidates[0]
+
+def send_email(post_title, published_date, ticket_links):
     if not EMAIL_ADDRESS or not EMAIL_APP_PASSWORD or not EMAIL_TO:
-        print("Email credentials not set. Skipping email.")
-        print(f"Would have sent: {post_title} - {ticket_link}")
-        return
+        print("Email credentials are not set.")
+        return False
 
     msg = EmailMessage()
     msg['Subject'] = "New Pint of View guest announced"
     msg['From'] = EMAIL_ADDRESS
     msg['To'] = EMAIL_TO
 
+    booking_links = "\n".join(ticket_links) if ticket_links else "No specific booking link found."
     content = f"""
 New post published: {post_title}
 Date: {published_date}
 
-Ticket Link: {ticket_link if ticket_link else "No specific booking link found."}
+Booking Links:
+{booking_links}
     """
     msg.set_content(content)
 
@@ -167,27 +216,85 @@ Ticket Link: {ticket_link if ticket_link else "No specific booking link found."}
             smtp.login(EMAIL_ADDRESS, EMAIL_APP_PASSWORD)
             smtp.send_message(msg)
         print("Email sent successfully.")
+        return True
     except Exception as e:
         print(f"Failed to send email: {e}")
+        return False
+
+
+def get_with_retries(url):
+    for attempt in range(1, 4):
+        try:
+            response = requests.get(url, headers=REQUEST_HEADERS, timeout=15)
+            response.raise_for_status()
+            return response
+        except requests.RequestException as error:
+            print(f"Feed request attempt {attempt}/3 failed: {error}")
+            if attempt < 3:
+                time.sleep(attempt)
+    return None
+
+
+def parse_rss_feed(xml_content):
+    root = ET.fromstring(xml_content)
+    items = []
+    for item in root.findall("./channel/item"):
+        content = next(
+            (child.text or "" for child in item if child.tag.endswith("}encoded")),
+            "",
+        )
+        items.append({
+            "title": item.findtext("title"),
+            "link": item.findtext("link"),
+            "pubDate": item.findtext("pubDate"),
+            "guid": item.findtext("guid"),
+            "description": item.findtext("description", ""),
+            "content": content,
+        })
+    return {"items": items}
 
 
 def fetch_feed_json():
-    # Use rss2json.com as a proxy to bypass Cloudflare and parse XML to JSON
-    # This avoids the 403 Forbidden error from Substack's direct RSS feed.
     rss_url = f"https://{SUBSTACK_DOMAIN}/feed.xml"
     api_url = f"https://api.rss2json.com/v1/api.json?rss_url={rss_url}"
-    
-    try:
-        resp = requests.get(api_url, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("status") != "ok":
+
+    response = get_with_retries(api_url)
+    if response:
+        try:
+            data = response.json()
+            if data.get("status") == "ok":
+                return data
             print(f"rss2json error: {data.get('message')}")
-            return None
-        return data
-    except Exception as e:
-        print(f"Error fetching feed via rss2json: {e}")
+        except ValueError as error:
+            print(f"Invalid rss2json response: {error}")
+
+    print("Falling back to the direct Substack RSS feed.")
+    response = get_with_retries(rss_url)
+    if not response:
         return None
+    try:
+        return parse_rss_feed(response.content)
+    except ET.ParseError as error:
+        print(f"Invalid direct RSS response: {error}")
+        return None
+
+
+def post_id(item):
+    return item.get("guid") or item.get("link")
+
+
+def unseen_items(items, last_post_id):
+    if not items:
+        return []
+    if not last_post_id:
+        return [items[0]]
+
+    for index, item in enumerate(items):
+        if post_id(item) == last_post_id:
+            return list(reversed(items[:index]))
+
+    print("Last processed post was not found in the feed; processing all available posts.")
+    return list(reversed(items))
 
 def main():
     state = load_state()
@@ -195,56 +302,48 @@ def main():
     
     feed_data = fetch_feed_json()
     if not feed_data or "items" not in feed_data:
-        print("No items found in feed.")
-        return
+        print("Could not fetch a usable feed.")
+        return 1
 
     items = feed_data["items"]
     if not items:
         print("No items found.")
-        return
-        
-    latest_item = items[0]
+        return 0
 
-    # Extract details
-    title = latest_item.get("title")
-    link = latest_item.get("link")
-    pub_date = latest_item.get("pubDate")
-    guid = latest_item.get("guid")
-    
-    # Use guid as ID
-    current_id = guid
-    
-    if last_post_id and current_id == last_post_id:
+    new_items = unseen_items(items, last_post_id)
+    if not new_items:
         print("No new posts.")
-        return
+        return 0
 
-    print(f"New post detected: {title}")
-    
-    # rss2json typically puts the full content in 'content'
-    body_html = latest_item.get("content", "")
-    if not body_html:
-        body_html = latest_item.get("description", "")
-    
-    ticket_link = None
-    if body_html:
-        ticket_link = extract_ticket_link(body_html)
-    
-    if not ticket_link:
-        print("No ticket link found in post body.")
-    else:
-        print(f"Found ticket link: {ticket_link}")
+    for item in new_items:
+        current_id = post_id(item)
+        if not current_id:
+            print("New post is missing a stable ID.")
+            return 1
 
-    # Send email
-    send_email(
-        post_title=title,
-        published_date=pub_date,
-        ticket_link=ticket_link
-    )
+        title = item.get("title")
+        pub_date = item.get("pubDate")
+        print(f"New post detected: {title}")
 
-    # Update state
-    state["last_post_id"] = current_id
-    state["last_published_at"] = pub_date
-    save_state(state)
+        body_html = item.get("content") or item.get("description", "")
+        ticket_links = extract_ticket_links(body_html) if body_html else []
+
+        if not ticket_links:
+            print("No ticket link found in post body.")
+        else:
+            print("Found ticket links:")
+            for ticket_link in ticket_links:
+                print(f"- {ticket_link}")
+
+        if not send_email(title, pub_date, ticket_links):
+            print("Email delivery failed; state was not updated.")
+            return 1
+
+        state["last_post_id"] = current_id
+        state["last_published_at"] = pub_date
+        save_state(state)
+
+    return 0
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

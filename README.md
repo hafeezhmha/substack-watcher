@@ -9,8 +9,9 @@ It is designed to run on **GitHub Actions** on a schedule (completely free), ens
 - **RSS Monitoring**: Checks the RSS feed every 30 minutes during peak hours.
 - **Bot Bypass**: Uses `rss2json.com` as a proxy to bypass Substack/Cloudflare bot protections (403 Forbidden).
 - **Smart Extraction**: Parses post content to find booking links for Eventbrite, Razorpay, Luma, etc.
-- **State Persistence**: Remembers the last processed post to avoid duplicate emails.
+- **State Persistence**: Advances only after a successful email, preventing lost notifications.
 - **Email Notifications**: Sends an email via Gmail SMTP with the direct booking link.
+- **Resilient Fetching**: Retries the RSS proxy and falls back to Substack's direct RSS feed.
 
 ## Setup
 
@@ -47,6 +48,13 @@ To run the script locally:
 3. **Run**:
    ```bash
    python watch_pintofview.py
+   ```
+
+   Email credentials are required. If delivery fails, the command exits with an error and leaves the post pending for the next run.
+
+4. **Run tests**:
+   ```bash
+   python -m unittest discover -s tests -v
    ```
 
 ## Files
